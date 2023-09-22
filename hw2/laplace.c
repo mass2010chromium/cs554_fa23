@@ -15,7 +15,7 @@ void laplace_iterate(float* buf, int n, float left, float right) {
 }
 
 int main ( int argc , char ** argv ) {
-    int k , p , me , left , right , count = 1, tag = 1, nit = 30000, n_local, n_total=300;
+    int k , p , me , left , right , count = 1, tag = 1, nit = 3000000, n_local, n_total=300;
     float ul, ur, u, u0 = 1.0 , alpha = 1.0 , beta = 2.0;
     MPI_Status status;
 
