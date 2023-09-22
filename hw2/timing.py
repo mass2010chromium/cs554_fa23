@@ -14,7 +14,7 @@ if __name__ == "__main__":
             log = read_log(i)
             log_data.append(log)
         except Exception as e:
-            print(e)
+            #print(e)
             break
         i = i + 1
 

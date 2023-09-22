@@ -1,12 +1,13 @@
 nnodes?=2
 ntasks?=4
 
-run: a.out
-	srun --partition=secondary --nodes=$(nnodes) --ntasks=$(ntasks) --mpi=pmi2 ./a.out
+run: laplace
+	srun --partition=secondary --nodes=$(nnodes) --ntasks=$(ntasks) --mpi=pmi2 ./laplace
 
-a.out:
-	mpicc laplace.c -std=c99
+laplace: laplace.c
+	mpicc laplace.c -std=c99 -o laplace
 
 .PHONY: clean
 clean:
 	rm -f *.out
+	rm -f laplace
