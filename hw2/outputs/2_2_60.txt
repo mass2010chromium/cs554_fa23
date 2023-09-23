@@ -1,0 +1,5 @@
+Run time stats:
+  Average: 7.0108375
+      Max: 7.01086
+      Min: 7.010815
+      Std: 2.250000000003638e-05
