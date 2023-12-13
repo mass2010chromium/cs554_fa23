@@ -26,6 +26,15 @@
     printf("]\n");\
 }
 
+#define print_ivector(vec, n, type) {\
+    type* v = (vec);\
+    printf("[ ");\
+    for (size_t r = 0; r < (n); ++r) {\
+        printf("%ld ", v[r]);\
+    }\
+    printf("]\n");\
+}
+
 #ifdef MOTION_DEBUG
 #include <assert.h>
 #define _assert assert

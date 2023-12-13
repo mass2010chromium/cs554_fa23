@@ -14,6 +14,13 @@ void solver_build_init(solver_build* res) {
     res->unconstrained_dim = 0;
     inplace_make_Vector(&res->cones, 8);
 }
+void solver_build_destroy(solver_build* res) {
+    Vector_clear_free(&res->A_data, 8);
+    Vector_destroy(&res->A_data);
+    Vector_destroy(&res->b_data);
+    Vector_destroy(&res->c_data);
+    Vector_destroy(&res->cones);
+}
 
 #include "cone_constructions.c"
 
@@ -42,7 +49,7 @@ void solver_build_freeze(solver_data* res, solver_build* input) {
     }
     res->cg_space.r = malloc(n_cols * sizeof(numeric));
     res->cg_space.b = malloc(n_cols * sizeof(numeric));
-    res->cg_space.scratch1 = malloc(n_cols * sizeof(numeric));
+    res->cg_space.scratch1 = malloc(n_rows * sizeof(numeric));
     res->cg_space.scratch2 = malloc(n_cols * sizeof(numeric));
     res->cg_space.p = malloc(n_cols * sizeof(numeric));
 
@@ -56,6 +63,28 @@ void solver_build_freeze(solver_data* res, solver_build* input) {
     res->u = malloc((n_rows+n_cols) * sizeof(numeric));       // excluding tau
     res->v = malloc((n_rows+n_cols) * sizeof(numeric));       // excluding tau
     res->u_tilde = malloc((n_rows+n_cols) * sizeof(numeric)); // excluding tau
+
+    memset(res->u, 0, (n_rows + n_cols) * sizeof(numeric));
+    memset(res->v, 0, (n_rows + n_cols) * sizeof(numeric));
+}
+
+void solver_free(solver_data* res) {
+    csr_dealloc(res->A);
+    free(res->A);
+    free(res->h);
+    free(res->cone_dims);
+    free(res->M_inv_h);
+    free(res->M_inv_w);
+    free(res->uv_scratch);
+    free(res->K);
+    free(res->u);
+    free(res->v);
+    free(res->u_tilde);
+    free(res->cg_space.r);
+    free(res->cg_space.b);
+    free(res->cg_space.scratch1);
+    free(res->cg_space.scratch2);
+    free(res->cg_space.p);
 }
 
 // We are interested in solving this system
@@ -100,13 +129,13 @@ size_t linsolve_cg_custom(numeric* res, cg_scratch* space, csr_mat* A, numeric* 
         numeric alpha = r_dot / denom;
 
         // x = x + alpha*p
-        __vo_mul(scratch1, p, alpha, n);
-        __vo_addv(res, res, scratch1, n);
+        __vo_madd(res, res, p, alpha, n);
 
-        //r = r - alpha*p
-        __vo_mul(scratch2, scratch2, alpha, n);
-        __vo_subv(r, r, scratch2, n);
-        if (__vo_norm(r, n) < eps) {
+        //r = r - alpha*A p
+        __vo_madd(r, r, scratch2, -alpha, n);
+        numeric resid = __vo_norm(r, n);
+        if (resid < eps) {
+            //printf("cg converged, residual %f\n", resid);
             return n_iters;
         }
 
@@ -128,6 +157,8 @@ static size_t solve_M_inverse(numeric* result, solver_data* problem, numeric* rh
 
     transpose_spmv(problem->cg_space.b, problem->A, rhs + n);
     __vo_subv(problem->cg_space.b, rhs, problem->cg_space.b, n);
+    //printf("rhs: ");
+    //print_vector(rhs, m+n);
 
     // NOTE: this will only solve the for z_x (the top part of M_inv_h).
     size_t niter = linsolve_cg_custom(result, &problem->cg_space, problem->A, problem->cg_space.b, tolerance);
@@ -139,27 +170,31 @@ static size_t solve_M_inverse(numeric* result, solver_data* problem, numeric* rh
     return niter;
 }
 
-size_t solve(numeric* res, solver_data* problem) {
+size_t solve(int* status, solver_data* problem) {
     size_t n_iters = 0;
     size_t m = problem->A->n_rows;
     size_t n = problem->A->n_cols;
 
     // PRESOLVE: solve for (M^-1 h) as documented.
-    size_t presolve_niter = solve_M_inverse(problem->M_inv_h, problem, problem->b, 1e-5);
+    size_t presolve_niter = solve_M_inverse(problem->M_inv_h, problem, problem->h, 1e-4);
 
     numeric h_M_inv_h = __vo_dot(problem->h, problem->M_inv_h, m + n);
     numeric alpha = 1.0 / (1.0 + __vo_dot(problem->h, problem->M_inv_h, m+n));
-
-    memset(problem->u, 0, (m + n) * sizeof(numeric));
-    memset(problem->v, 0, (m + n) * sizeof(numeric));
     numeric u_t = 1;
     numeric v_t = 1;
     numeric u_tilde_t;
 
     // K = alpha(M_inv_h h^T M_inv_h)
     __vo_mul(problem->K, problem->M_inv_h, alpha * h_M_inv_h, m + n);
+    //printf("alpha = %f\n", alpha);
+    //print_vector(problem->K, m+n);
 
-    numeric tolerance = 1e-5;
+    numeric tolerance = 1e-4;
+    numeric termination_eps = 1e-3; // default for scs.
+    numeric b_norm = __vo_norm(problem->b, m);
+    numeric c_norm = __vo_norm(problem->c, n);
+    numeric primal_eps = termination_eps * (1 + b_norm);
+    numeric dual_eps = termination_eps * (1 + c_norm);
     for (;; ++n_iters) {
         // Step 1: projection onto the affine subspace.
         //
@@ -171,21 +206,22 @@ size_t solve(numeric* res, solver_data* problem) {
         // Precomputed:
         //       alpha = 1 / (1 + h^T M_inv_h)
         //           K = alpha(M_inv_h h^T M_inv_h)
-        size_t w_t = u_t + v_t;
+        numeric w_t = u_t + v_t;
         __vo_addv(problem->uv_scratch, problem->u, problem->v, m + n);
-        solve_M_inverse(problem->M_inv_w, problem, problem->uv_scratch, tolerance);
+        size_t cg_iters = solve_M_inverse(problem->M_inv_w, problem, problem->uv_scratch, tolerance);
         numeric h_M_inv_w = __vo_dot(problem->h, problem->M_inv_w, m + n);
-        __vo_madd(problem->u_tilde, problem->M_inv_w, problem->M_inv_h, -h_M_inv_w * alpha, m + n);
-        __vo_addv(problem->u_tilde, problem->u_tilde, problem->K, m + n);
-        __vo_madd(problem->u_tilde, problem->u_tilde, problem->M_inv_h, -w_t, m + n);
-        u_tilde_t = w_t + __vo_dot(problem->M_inv_w, problem->h, m + n);
+
+        __vo_subv(problem->u_tilde, problem->K, problem->M_inv_h, m + n);
+        __vo_madd(problem->u_tilde, problem->M_inv_w, problem->u_tilde, w_t, m + n);
+        __vo_madd(problem->u_tilde, problem->u_tilde, problem->M_inv_h, -h_M_inv_w * alpha, m + n);
+        u_tilde_t = w_t + __vo_dot(problem->u_tilde, problem->h, m + n);
 
 
         // Step 2: project onto the cone.
         //
         // u = proj(~u - v)
         __vo_subv(problem->u, problem->u_tilde, problem->v, m + n);
-        numeric* proj_start = problem->u + problem->unconstrained_dim;
+        numeric* proj_start = problem->u + n;
         project_to_socs(proj_start, problem->cone_dims, problem->num_cones);
         // complementary vars stay positive.
         u_t = u_tilde_t - v_t;
@@ -194,10 +230,75 @@ size_t solve(numeric* res, solver_data* problem) {
 
         // Step 3: update v.
         __vo_subv(problem->v, problem->v, problem->u_tilde, m+n);
-        __vo_addv(problem->v, problem->u, problem->u, m+n);
+        __vo_addv(problem->v, problem->v, problem->u, m+n);
         v_t = v_t - u_tilde_t + u_t;
 
+        numeric gap_resid = -1;
+
+        // Residuals check.
+        if (u_t > 0) {
+            // are we done yet?
+            numeric scale = 1 / u_t;
+
+            spmv(problem->uv_scratch, problem->A, problem->u);
+            __vo_addv(problem->uv_scratch, problem->uv_scratch, problem->v+n, m);
+            __vo_mul(problem->uv_scratch, problem->uv_scratch, scale, m);
+            __vo_subv(problem->uv_scratch, problem->uv_scratch, problem->b, m);
+            numeric primal_resid = __vo_norm(problem->uv_scratch, m);
+
+            transpose_spmv(problem->uv_scratch, problem->A, problem->u+n);
+            __vo_mul(problem->uv_scratch, problem->uv_scratch, scale, m);
+            __vo_addv(problem->uv_scratch, problem->uv_scratch, problem->c, n);
+            numeric dual_resid = __vo_norm(problem->uv_scratch, n);
+
+            gap_resid = scale * __vo_dot(problem->u, problem->h, m+n);
+            numeric gap_eps = termination_eps * (1 + scale * (fabs(__vo_dot(problem->c, problem->u, n))
+                                                            + fabs(__vo_dot(problem->b, problem->u+n, m))));
+
+            if (primal_resid < primal_eps
+                && dual_resid < dual_eps
+                && fabs(gap_resid) < gap_eps
+            ) {
+                __vo_mul(problem->u, problem->u, scale, m+n);
+                printf("solved!\n");
+                *status = 0;
+                break;
+            }
+        }
+        else {
+            // Check unbounded or infeasible.
+            spmv(problem->uv_scratch, problem->A, problem->u);
+            __vo_addv(problem->uv_scratch, problem->uv_scratch, problem->v+n, m);
+            numeric unbounded_resid = __vo_norm(problem->uv_scratch, m);
+            numeric unbounded_eps = -termination_eps * __vo_dot(problem->c, problem->u, n) / c_norm;
+
+            if (unbounded_resid < unbounded_eps) {
+                printf("unbounded!\n");
+                *status = 1;
+                break;
+            }
+
+            transpose_spmv(problem->uv_scratch, problem->A, problem->u+n);
+            numeric infeasible_resid = __vo_norm(problem->uv_scratch, n);
+            numeric infeasible_eps = -termination_eps * __vo_dot(problem->b, problem->u+n, m) / b_norm;
+
+            if (infeasible_resid < infeasible_eps) {
+                printf("infeasible!\n");
+                *status = 2;
+                break;
+            }
+        }
+
+        printf("Iteration %ld gap %f\n", n_iters, gap_resid);
+        printf("  cg iters: %ld\n", cg_iters);
+
         tolerance = tolerance * 0.9;
+
+        //printf("Iteration %ld: ",n_iters);
+        //print_vector(problem->u, m+n);
+        //print_vector(problem->u_tilde, m+n);
+        //printf("%f %f\n", u_t, u_tilde_t);
+        //printf("\n");
     }
     return n_iters;
 }

@@ -292,7 +292,7 @@ PyObject* so3_axis_angle(PyObject* self, PyObject* args) {
         return NULL;
     }
 #endif
-    PyObject* ret = Py_BuildValue("(Od)", ret_axis, len);
+    PyObject* ret = Py_BuildValue("(Nd)", ret_axis, len);
 #ifdef MOTION_DEBUG
     if (ret == NULL) {
         Py_DECREF(ret_axis);

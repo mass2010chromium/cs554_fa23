@@ -1,8 +1,8 @@
 #define PY_SSIZE_T_CLEAN
+#include "interface.h"
 #include <Python.h>
 #include "types.h"
 #include "math/utils.h"
-#include "interface.h"
 #include "problem.h"
 #include "matrix_math.h"
 
@@ -12,15 +12,23 @@
 PyDoc_STRVAR(Py_linsolve_doc, "solve by cg for an invertible A.");
 PyDoc_STRVAR(Py_init_solver_doc, "allocate space for the solver.");
 PyDoc_STRVAR(Py_set_lin_term_doc, "add a linear term to the optimization objective.");
+PyDoc_STRVAR(Py_add_linear_constraint_doc, "Add a linear constraint Ax = b");
 PyDoc_STRVAR(Py_add_quad_term_doc, "add a quad form term to the optimization objective. Use cholesky factor L^T to specify.");
+PyDoc_STRVAR(Py_add_l2_term_doc, "add a l2 term term to the optimization objective. Scaled by lambda, specify with sparse K.");
 PyDoc_STRVAR(Py_finalize_solver_doc, "turn solver internals into compressed form (no more adding things)");
+PyDoc_STRVAR(Py_socp_solve_doc, "solve the socp after finalization");
+PyDoc_STRVAR(Py_dealloc_solver_doc, "free buffers of finalized solver");
 
 static PyMethodDef socpMethods[] = {
     {"linsolve", (PyCFunction) Py_linsolve, METH_FASTCALL, Py_linsolve_doc},
     {"init_solver", (PyCFunction) Py_init_solver, METH_NOARGS, Py_init_solver_doc},
     {"set_lin_term", (PyCFunction) Py_set_lin_term, METH_FASTCALL, Py_set_lin_term_doc},
+    {"add_linear_constraint", (PyCFunction) Py_add_linear_constraint, METH_FASTCALL, Py_add_linear_constraint_doc},
     {"add_quad_term", (PyCFunction) Py_add_quad_term, METH_FASTCALL, Py_add_quad_term_doc},
+    {"add_l2_term", (PyCFunction) Py_add_l2_term, METH_FASTCALL, Py_add_l2_term_doc},
     {"finalize_solver", (PyCFunction) Py_finalize_solver, METH_NOARGS, Py_finalize_solver_doc},
+    {"socp_solve", (PyCFunction) Py_socp_solve, METH_NOARGS, Py_socp_solve_doc},
+    {"dealloc_solver", (PyCFunction) Py_dealloc_solver, METH_NOARGS, Py_dealloc_solver_doc},
 /*
     {"sub", (PyCFunction) vectorops_sub, METH_FASTCALL, vectorops_sub_doc},
     {"mul", (PyCFunction) vectorops_mul, METH_FASTCALL, vectorops_mul_doc},
@@ -146,6 +154,7 @@ PyObject* Py_set_lin_term(PyObject* self, PyObject* const* args, Py_ssize_t narg
 #ifdef MOTION_DEBUG
     if (nargs != 1) {
         PyErr_SetString(PyExc_TypeError, "Wrong number of arguments (expected 1)");
+        return NULL;
     }
 #endif
     PyObject* first = args[0];
@@ -154,8 +163,41 @@ PyObject* Py_set_lin_term(PyObject* self, PyObject* const* args, Py_ssize_t narg
     if (list_to_vector(first, c_data)) {
         return NULL;
     }
-
     solver_build_set_lin_term(&solver_build_struct, c_data, n);
+    free(c_data);
+    Py_RETURN_NONE;
+}
+
+PyObject* Py_add_linear_constraint(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+#ifdef MOTION_DEBUG
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "Wrong number of arguments (expected 2)");
+        return NULL;
+    }
+    if (!(PyFloat_Check(args[2]) || PyLong_Check(args[2]))) {
+        PyErr_SetString(PyExc_TypeError, "Expected number for args[2]");
+        return NULL;
+    }
+#endif
+    PyObject* first = args[0];
+    PyObject* second = args[1];
+    Py_ssize_t n = PyObject_Length(second);
+    numeric* b = malloc(n*sizeof(numeric));
+    if (list_to_vector(second, b)) {
+        free(b);
+        return NULL;
+    }
+
+    Vector coo_mat;
+    inplace_make_Vector(&coo_mat, 1);
+    if (parse_py_coo(&coo_mat, first)) {
+        PyErr_SetString(PyExc_ValueError, "Failed to parse coo matrix K");
+        free(b);
+        return NULL;
+    }
+
+    solver_build_add_linear_constraint(&solver_build_struct, &coo_mat, b, n);
+    free(b);
     Py_RETURN_NONE;
 }
 
@@ -163,6 +205,7 @@ PyObject* Py_add_quad_term(PyObject* self, PyObject* const* args, Py_ssize_t nar
 #ifdef MOTION_DEBUG
     if (nargs != 2) {
         PyErr_SetString(PyExc_TypeError, "Wrong number of arguments (expected 2)");
+        return NULL;
     }
     if (!(PyFloat_Check(args[1]) || PyLong_Check(args[1]))) {
         PyErr_SetString(PyExc_TypeError, "Expected number for args[1]");
@@ -170,12 +213,12 @@ PyObject* Py_add_quad_term(PyObject* self, PyObject* const* args, Py_ssize_t nar
     }
 #endif
     PyObject* first = args[0];
-    double n = PyFloat_AsDouble(args[1]);
+    size_t n = PyLong_AsLong(args[1]);
 
     Vector coo_mat;
     inplace_make_Vector(&coo_mat, 1);
     if (parse_py_coo(&coo_mat, first)) {
-        PyErr_SetString(PyExc_ValueError, "Failed to parse coo matrix A");
+        PyErr_SetString(PyExc_ValueError, "Failed to parse coo matrix L^T");
         return NULL;
     }
 
@@ -183,10 +226,64 @@ PyObject* Py_add_quad_term(PyObject* self, PyObject* const* args, Py_ssize_t nar
     Py_RETURN_NONE;
 }
 
+PyObject* Py_add_l2_term(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+#ifdef MOTION_DEBUG
+    if (nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "Wrong number of arguments (expected 3)");
+        return NULL;
+    }
+    if (!(PyFloat_Check(args[2]) || PyLong_Check(args[2]))) {
+        PyErr_SetString(PyExc_TypeError, "Expected number for args[2]");
+        return NULL;
+    }
+#endif
+    PyObject* first = args[0];
+    PyObject* second = args[1];
+    Py_ssize_t n = PyObject_Length(second);
+    numeric* f = malloc(n*sizeof(numeric));
+    if (list_to_vector(second, f)) {
+        free(f);
+        return NULL;
+    }
+
+    double lambda = PyFloat_AsDouble(args[2]);
+
+    Vector coo_mat;
+    inplace_make_Vector(&coo_mat, 1);
+    if (parse_py_coo(&coo_mat, first)) {
+        PyErr_SetString(PyExc_ValueError, "Failed to parse coo matrix K");
+        free(f);
+        return NULL;
+    }
+
+    solver_build_add_l2_term(&solver_build_struct, &coo_mat, f, lambda, n);
+    free(f);
+    Py_RETURN_NONE;
+}
+
 PyObject* Py_finalize_solver(PyObject* self, PyObject* args) {
     solver_build_freeze(&problem, &solver_build_struct);
+    solver_build_destroy(&solver_build_struct);
     print_csr_entries(problem.A);
     print_vector(problem.b, problem.A->n_rows);
     print_vector(problem.c, problem.A->n_cols);
+
+    printf("Unconstrained: %ld\n", problem.unconstrained_dim);
+    printf("Cones: ");
+    print_ivector(problem.cone_dims, problem.num_cones, size_t);
+    printf("\n");
+    Py_RETURN_NONE;
+}
+
+PyObject* Py_socp_solve(PyObject* self, PyObject* args) {
+    int status;
+    size_t niter = solve(&status, &problem);
+    //PyObject* u = vector_to_list(problem.u, problem.A->n_rows + problem.A->n_cols);
+    PyObject* u = vector_to_list(problem.u, problem.unconstrained_dim);
+    return Py_BuildValue("(nnN)", niter, status, u);
+}
+
+PyObject* Py_dealloc_solver(PyObject* self, PyObject* args) {
+    solver_free(&problem);
     Py_RETURN_NONE;
 }
