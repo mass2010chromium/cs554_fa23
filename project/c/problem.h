@@ -12,6 +12,7 @@ typedef struct solver_data {
     size_t unconstrained_dim;
     size_t* cone_dims;  // List of second-order cone dimensions.
     size_t num_cones;
+    size_t n_fix_rows;
 
     // Scratch space.
     cg_scratch cg_space;
@@ -29,7 +30,8 @@ typedef struct solver_build {
     Vector/* <numeric> */ b_data;
     Vector/* <numeric> */ c_data;
     size_t unconstrained_dim;
-    Vector/* <numeric*> */ cones;
+    Vector/* <size_t> */ cones;
+    size_t n_fix_rows;
 } solver_build;
 
 void solver_build_init(solver_build* res);

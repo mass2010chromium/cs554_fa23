@@ -13,6 +13,7 @@ void solver_build_init(solver_build* res) {
     inplace_make_Vector(&res->c_data, 8);
     res->unconstrained_dim = 0;
     inplace_make_Vector(&res->cones, 8);
+    res->n_fix_rows = 0;
 }
 void solver_build_destroy(solver_build* res) {
     Vector_clear_free(&res->A_data, 8);
@@ -47,6 +48,8 @@ void solver_build_freeze(solver_data* res, solver_build* input) {
     for (size_t i = 0; i < n_cones; ++i) {
         res->cone_dims[i] = (size_t) input->cones.elements[i];
     }
+    res->n_fix_rows = input->n_fix_rows;
+
     res->cg_space.r = malloc(n_cols * sizeof(numeric));
     res->cg_space.b = malloc(n_cols * sizeof(numeric));
     res->cg_space.scratch1 = malloc(n_rows * sizeof(numeric));
@@ -144,8 +147,7 @@ size_t linsolve_cg_custom(numeric* res, cg_scratch* space, csr_mat* A, numeric* 
         r_dot = r_dot2;
 
         // p = r + beta*p
-        __vo_mul(p, p, beta, n);
-        __vo_addv(p, p, r, n);
+        __vo_madd(p, r, p, beta, n);
     }
 }
 
@@ -221,7 +223,8 @@ size_t solve(int* status, solver_data* problem) {
         //
         // u = proj(~u - v)
         __vo_subv(problem->u, problem->u_tilde, problem->v, m + n);
-        numeric* proj_start = problem->u + n;
+        memset(problem->u + n, 0, problem->n_fix_rows*sizeof(numeric));
+        numeric* proj_start = problem->u + n + problem->n_fix_rows;
         project_to_socs(proj_start, problem->cone_dims, problem->num_cones);
         // complementary vars stay positive.
         u_t = u_tilde_t - v_t;

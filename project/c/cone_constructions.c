@@ -46,6 +46,7 @@ void solver_build_add_linear_constraint(solver_build* self, Vector/*<matrix_entr
         a.d = b[i];
         Vector_push(&self->b_data, a.v);  // Equality constraints for defining t.
     }
+    self->n_fix_rows += num_vars;
 }
 
 /**

@@ -44,9 +44,13 @@ typedef struct cone_proj_dat {
     size_t n_cones;
 } cone_proj_dat;
 
+#define PROJ_ITERS 1
+
 int cone_proj(job_spec* arg) {
     cone_proj_dat* data = (cone_proj_dat*) arg;
-    project_to_socs(data->x, data->cone_dims, data->n_cones);
+    for (size_t i = 0; i < PROJ_ITERS; ++i) {
+        project_to_socs(data->x, data->cone_dims, data->n_cones);
+    }
     return 0;
 }
 
@@ -55,16 +59,8 @@ numeric rand_float() {
     return rand() / (numeric) RAND_MAX;
 }
 
-
-// NOTE: parallelization experiment results
-// It's only worth parallelizing computations on the order of 10^6.
-// Outer product (1000x1000): parallelize with 4 threads
-// cone projection (1024000 x 4): parallelize with 4 threads.
-//      I don't think this actually happens so we just don't parallelize.
-int main() {
-    srand(0);
-
-    size_t N = 1024000;
+void run(N, nthreads) {
+    printf("N=%ld\n", N);
     numeric* buf = calloc(N, sizeof(numeric));
     numeric* res1 = calloc(N, sizeof(numeric));
     numeric* res2 = calloc(N, sizeof(numeric));
@@ -82,13 +78,20 @@ int main() {
     uint64_t dt;
     clock_gettime(CLOCK_MONOTONIC_RAW, &start);
     memcpy(res1, buf, N*sizeof(numeric));
-    project_to_socs(res1, cones, n_cones);
+    for (size_t i = 0; i < PROJ_ITERS; ++i) {
+        project_to_socs(res1, cones, n_cones);
+    }
 
     clock_gettime(CLOCK_MONOTONIC_RAW, &end);
     dt = (end.tv_sec - start.tv_sec)*1000000000 + (end.tv_nsec - start.tv_nsec);
-    printf("time taken: %ld nanoseconds\n", dt);
+    printf("serial time taken: \n\t%ld nanoseconds\n", dt);
 
-    size_t nthreads = 4;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+    dt = (end.tv_sec - start.tv_sec)*1000000000 + (end.tv_nsec - start.tv_nsec);
+    printf("serial time taken: \n\t%ld nanoseconds\n", dt);
+
+    clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+
     worker_batch* workers = make_worker_batch(nthreads);
 
     size_t cone_offset = 0;
@@ -121,12 +124,62 @@ int main() {
 
     clock_gettime(CLOCK_MONOTONIC_RAW, &end);
     dt = (end.tv_sec - start.tv_sec)*1000000000 + (end.tv_nsec - start.tv_nsec);
-    printf("time taken: %ld nanoseconds\n", dt);
+    printf("parallel time taken (%ld threads): \n\t%ld nanoseconds\n", nthreads, dt);
 
     if (memcmp(res1, res2, N*sizeof(numeric))) {
         printf("output arrays differ!\n");
     }
 
+    clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+    memcpy(res1, buf, N*sizeof(numeric));
+    for (size_t i = 0; i < PROJ_ITERS; ++i) {
+        project_to_socs(res1, cones, n_cones);
+    }
+    memcpy(res2, buf, N*sizeof(numeric));
+
+    send_job_homogenous(workers, cone_proj, (job_spec*) job_data, sizeof(cone_proj_dat));
+    batch_wait(workers);
+
+    clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+    dt = (end.tv_sec - start.tv_sec)*1000000000 + (end.tv_nsec - start.tv_nsec);
+    printf("parallel time taken (%ld threads): \n\t%ld nanoseconds\n", nthreads, dt);
+
     destroy_worker_batch(workers);
     free(workers);
+
+}
+
+// NOTE: parallelization experiment results
+// It's only worth parallelizing computations on the order of 10^6.
+// Outer product (1000x1000): parallelize with 4 threads
+// cone projection (1024000 x 4): parallelize with 4 threads.
+//      I don't think this actually happens so we just don't parallelize.
+int main(int argc, char** argv) {
+    srand(0);
+
+    size_t N, nthreads;
+    if (argc == 1) {
+        size_t min_sz = 1024;
+        nthreads = 2;
+        for (size_t i = 0; i < 4; ++i) {
+            N = min_sz;
+            for (size_t j = 0; j < 6; ++j) {
+                run(N, nthreads);
+                N = N * 10;
+            }
+            nthreads = nthreads * 2;
+        }
+        return 0;
+    }
+
+    N = 1024;
+    if (argc > 1) {
+        N = strtoll(argv[1], NULL, 10);
+    }
+    nthreads = 2;
+    if (argc > 2) {
+        nthreads = strtoll(argv[2], NULL, 10);
+    }
+    run(N, nthreads);
+    return 0;
 }
